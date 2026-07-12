@@ -1,20 +1,17 @@
 /**
- * LLM Chat Application Template
+ * LLM Chat Application for Paraíso de Aves
  *
- * A simple chat application using Cloudflare Workers AI.
- * This template demonstrates how to implement an LLM-powered chat interface with
- * streaming responses using Server-Sent Events (SSE).
+ * Uses Cloudflare AI Search to retrieve information from
+ * paraisodeaves.com before generating a response.
  *
  * @license MIT
  */
+
 import { Env, ChatMessage } from "./types";
 
-// Model ID for Workers AI model
-// https://developers.cloudflare.com/workers-ai/models/
+// Workers AI model used to generate responses.
 const MODEL_ID = "@cf/meta/llama-3.1-8b-instruct-fp8";
 
-// Default system prompt
-const SYSTEM_PROMPT = `
 const SYSTEM_PROMPT = `
 You are the official AI Bird Adviser for Paraíso de Aves.
 
@@ -44,7 +41,7 @@ LANGUAGE CONSISTENCY
 
 - Detect the language of the visitor's latest message.
 - Reply entirely in that same language.
-- Never mix languages in one response unless the visitor explicitly requests a translation.
+- Never mix languages unless the visitor explicitly requests a translation.
 - If the visitor writes in Spanish, reply only in Spanish.
 - If the visitor writes in French, reply only in French.
 - If the visitor writes in Portuguese, reply only in Portuguese.
@@ -65,6 +62,18 @@ Help visitors understand:
 - transport
 - CITES documentation
 - the Paraíso de Aves adoption process
+
+WEBSITE KNOWLEDGE
+
+- Treat retrieved content from paraisodeaves.com as the primary source of truth.
+- Answer factual questions using the retrieved website content.
+- Never contradict retrieved website content.
+- If the retrieved content does not contain enough information, clearly say that the answer could not be verified from the Paraíso de Aves website.
+- Do not fill missing business information using assumptions or general model knowledge.
+- Never invent availability, prices, ages, sex, health status, delivery dates or legal permissions.
+- Do not claim to have checked live inventory unless verified inventory data has been supplied.
+- When useful, mention the relevant Paraíso de Aves page used for the answer.
+- Never invent website page URLs.
 
 STRICT BUSINESS RULES
 
@@ -94,10 +103,8 @@ RESPONSE BEHAVIOUR
 - Do not use excessive emojis.
 - Do not criticise competitors.
 - When unsure, clearly state that the information must be confirmed by the Paraíso de Aves team.
-- Do not pretend to have checked live inventory unless verified inventory data has actually been supplied.
 - When discussing prices, availability, delivery or documentation, recommend submitting an enquiry through the website.
-- When appropriate, direct visitors to the Available Birds, Delivery, CITES or Contact pages.
-- Never invent page URLs.
+- When appropriate, direct visitors to the Available Birds, Delivery, CITES or Contact sections.
 
 CONTACT
 
@@ -109,86 +116,159 @@ paraisodeloros@gmail.com
 
 End purchase-related responses with a clear next step, such as viewing available birds or submitting an enquiry through the website.
 `;
+
 export default {
 	/**
-	 * Main request handler for the Worker
+	 * Main request handler.
 	 */
 	async fetch(
 		request: Request,
 		env: Env,
-		ctx: ExecutionContext,
+		_ctx: ExecutionContext,
 	): Promise<Response> {
 		const url = new URL(request.url);
 
-		// Handle static assets (frontend)
+		// Serve the frontend and other static assets.
 		if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
 			return env.ASSETS.fetch(request);
 		}
 
-		// API Routes
+		// Chat API endpoint.
 		if (url.pathname === "/api/chat") {
-			// Handle POST requests for chat
-			if (request.method === "POST") {
-				return handleChatRequest(request, env);
+			if (request.method !== "POST") {
+				return new Response("Method not allowed", {
+					status: 405,
+					headers: {
+						Allow: "POST",
+					},
+				});
 			}
 
-			// Method not allowed for other request types
-			return new Response("Method not allowed", { status: 405 });
+			return handleChatRequest(request, env);
 		}
 
-		// Handle 404 for unmatched routes
 		return new Response("Not found", { status: 404 });
 	},
 } satisfies ExportedHandler<Env>;
 
 /**
- * Handles chat API requests
+ * Processes a chat request using Cloudflare AI Search.
  */
 async function handleChatRequest(
 	request: Request,
 	env: Env,
 ): Promise<Response> {
 	try {
-		// Parse JSON request body
-		const { messages = [] } = (await request.json()) as {
-			messages: ChatMessage[];
+		const body = (await request.json()) as {
+			messages?: ChatMessage[];
 		};
 
-		// Add system prompt if not present
-		if (!messages.some((msg) => msg.role === "system")) {
-			messages.unshift({ role: "system", content: SYSTEM_PROMPT });
+		const incomingMessages = Array.isArray(body.messages)
+			? body.messages
+			: [];
+
+		/*
+		 * Remove client-supplied system prompts so visitors cannot override
+		 * the official Paraíso de Aves instructions.
+		 *
+		 * Keep only the last 10 user/assistant messages.
+		 */
+		const cleanMessages: ChatMessage[] = incomingMessages
+			.filter(
+				(message): message is ChatMessage =>
+					Boolean(message) &&
+					(message.role === "user" ||
+						message.role === "assistant") &&
+					typeof message.content === "string" &&
+					message.content.trim().length > 0,
+			)
+			.map((message) => ({
+				role: message.role,
+				content: message.content.trim().slice(0, 2000),
+			}))
+			.slice(-10);
+
+		const hasUserMessage = cleanMessages.some(
+			(message) => message.role === "user",
+		);
+
+		if (!hasUserMessage) {
+			return jsonResponse(
+				{
+					error: "At least one user message is required.",
+				},
+				400,
+			);
 		}
 
-		const inputs = {
-			messages,
-			max_tokens: 1024,
-			stream: true,
-		} satisfies AiTextGenerationInput & { stream: true };
+		const messages: ChatMessage[] = [
+			{
+				role: "system",
+				content: SYSTEM_PROMPT,
+			},
+			...cleanMessages,
+		];
 
-		const stream = await env.AI.run<typeof MODEL_ID>(MODEL_ID, inputs, {
-			// Uncomment to use AI Gateway
-			// gateway: {
-			//   id: "YOUR_GATEWAY_ID", // Replace with your AI Gateway ID
-			//   skipCache: false,      // Set to true to bypass cache
-			//   cacheTtl: 3600,        // Cache time-to-live in seconds
-			// },
-		});
+		/*
+		 * AI Search retrieves relevant content from paraisodeaves.com
+		 * and then generates a grounded answer.
+		 */
+		const stream =
+			await env.PARAISO_SEARCH.chatCompletions({
+				messages,
+				model: MODEL_ID,
+				stream: true,
+				ai_search_options: {
+					retrieval: {
+						retrieval_type: "hybrid",
+						max_num_results: 6,
+						match_threshold: 0.4,
+						context_expansion: 1,
+					},
+					query_rewrite: {
+						enabled: true,
+					},
+				},
+			});
 
 		return new Response(stream, {
 			headers: {
-				"content-type": "text/event-stream; charset=utf-8",
-				"cache-control": "no-cache",
+				"content-type":
+					"text/event-stream; charset=utf-8",
+				"cache-control":
+					"no-cache, no-transform",
 				connection: "keep-alive",
+				"x-content-type-options": "nosniff",
 			},
 		});
 	} catch (error) {
-		console.error("Error processing chat request:", error);
-		return new Response(
-			JSON.stringify({ error: "Failed to process request" }),
+		console.error(
+			"Error processing chat request:",
+			error,
+		);
+
+		return jsonResponse(
 			{
-				status: 500,
-				headers: { "content-type": "application/json" },
+				error: "Failed to process request.",
 			},
+			500,
 		);
 	}
+}
+
+/**
+ * Creates a JSON response.
+ */
+function jsonResponse(
+	data: Record<string, unknown>,
+	status = 200,
+): Response {
+	return new Response(JSON.stringify(data), {
+		status,
+		headers: {
+			"content-type":
+				"application/json; charset=utf-8",
+			"cache-control": "no-store",
+		},
+	});
 }
