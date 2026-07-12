@@ -1,230 +1,258 @@
-/**
- * LLM Chat App Frontend
- *
- * Handles the chat UI interactions and communication with the backend API.
- */
-
-// DOM elements
-const chatMessages = document.getElementById("chat-messages");
-const userInput = document.getElementById("user-input");
+const form = document.getElementById("chat-form");
+const input = document.getElementById("message-input");
 const sendButton = document.getElementById("send-button");
-const typingIndicator = document.getElementById("typing-indicator");
+const messagesContainer = document.getElementById("messages");
+const quickActions = document.getElementById("quick-actions");
 
-// Chat state
-let chatHistory = [
-	{
-		role: "assistant",
-		content:
-			"Hello! I'm an LLM chat app powered by Cloudflare Workers AI. How can I help you today?",
-	},
-];
-let isProcessing = false;
+const conversation = [];
 
-// Auto-resize textarea as user types
-userInput.addEventListener("input", function () {
-	this.style.height = "auto";
-	this.style.height = this.scrollHeight + "px";
-});
+let isSubmitting = false;
 
-// Send message on Enter (without Shift)
-userInput.addEventListener("keydown", function (e) {
-	if (e.key === "Enter" && !e.shiftKey) {
-		e.preventDefault();
-		sendMessage();
+function scrollToBottom() {
+	messagesContainer.scrollTop = messagesContainer.scrollHeight;
+}
+
+function escapeHtml(value) {
+	return value
+		.replaceAll("&", "&amp;")
+		.replaceAll("<", "&lt;")
+		.replaceAll(">", "&gt;")
+		.replaceAll('"', "&quot;")
+		.replaceAll("'", "&#039;");
+}
+
+function formatMessage(value) {
+	const escaped = escapeHtml(value);
+
+	const linked = escaped.replace(
+		/(https?:\/\/[^\s<]+)/g,
+		(url) =>
+			`<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`,
+	);
+
+	return linked.replace(/\n/g, "<br>");
+}
+
+function createMessage(role, content, options = {}) {
+	const row = document.createElement("div");
+	row.className = `message-row ${role}`;
+
+	const bubble = document.createElement("div");
+	bubble.className = "message-bubble";
+
+	if (options.typing) {
+		bubble.innerHTML = `
+			<span class="typing" aria-label="Escribiendo">
+				<span></span>
+				<span></span>
+				<span></span>
+			</span>
+		`;
+	} else {
+		bubble.innerHTML = formatMessage(content);
 	}
-});
 
-// Send button click handler
-sendButton.addEventListener("click", sendMessage);
+	row.appendChild(bubble);
+	messagesContainer.appendChild(row);
+	scrollToBottom();
 
-/**
- * Sends a message to the chat API and processes the response
- */
-async function sendMessage() {
-	const message = userInput.value.trim();
+	return {
+		row,
+		bubble,
+	};
+}
 
-	// Don't send empty messages
-	if (message === "" || isProcessing) return;
+function setLoading(loading) {
+	isSubmitting = loading;
+	sendButton.disabled = loading;
+	input.disabled = loading;
+	sendButton.textContent = loading ? "..." : "Enviar";
+}
 
-	// Disable input while processing
-	isProcessing = true;
-	userInput.disabled = true;
-	sendButton.disabled = true;
+function hideQuickActions() {
+	if (quickActions) {
+		quickActions.remove();
+	}
+}
 
-	// Add user message to chat
-	addMessageToChat("user", message);
+async function submitMessage(message) {
+	const cleanMessage = message.trim();
 
-	// Clear input
-	userInput.value = "";
-	userInput.style.height = "auto";
+	if (!cleanMessage || isSubmitting) {
+		return;
+	}
 
-	// Show typing indicator
-	typingIndicator.classList.add("visible");
+	hideQuickActions();
 
-	// Add message to history
-	chatHistory.push({ role: "user", content: message });
+	createMessage("user", cleanMessage);
+
+	conversation.push({
+		role: "user",
+		content: cleanMessage,
+	});
+
+	input.value = "";
+	setLoading(true);
+
+	const typingMessage = createMessage("assistant", "", {
+		typing: true,
+	});
 
 	try {
-		// Create new assistant response element
-		const assistantMessageEl = document.createElement("div");
-		assistantMessageEl.className = "message assistant-message";
-		assistantMessageEl.innerHTML = "<p></p>";
-		chatMessages.appendChild(assistantMessageEl);
-		const assistantTextEl = assistantMessageEl.querySelector("p");
-
-		// Scroll to bottom
-		chatMessages.scrollTop = chatMessages.scrollHeight;
-
-		// Send request to API
 		const response = await fetch("/api/chat", {
 			method: "POST",
 			headers: {
-				"Content-Type": "application/json",
+				"content-type": "application/json",
 			},
 			body: JSON.stringify({
-				messages: chatHistory,
+				messages: conversation.slice(-10),
 			}),
 		});
 
-		// Handle errors
 		if (!response.ok) {
-			throw new Error("Failed to get response");
-		}
-		if (!response.body) {
-			throw new Error("Response body is null");
+			const errorBody = await response
+				.json()
+				.catch(() => null);
+
+			throw new Error(
+				errorBody?.details ||
+					errorBody?.error ||
+					`Request failed with status ${response.status}`,
+			);
 		}
 
-		// Process streaming response
+		if (!response.body) {
+			throw new Error("The response stream is unavailable.");
+		}
+
 		const reader = response.body.getReader();
 		const decoder = new TextDecoder();
-		let responseText = "";
-		let buffer = "";
-		const flushAssistantText = () => {
-			assistantTextEl.textContent = responseText;
-			chatMessages.scrollTop = chatMessages.scrollHeight;
-		};
 
-		let sawDone = false;
+		let buffer = "";
+		let answer = "";
+
+		typingMessage.bubble.innerHTML = "";
+
 		while (true) {
-			const { done, value } = await reader.read();
+			const { value, done } = await reader.read();
 
 			if (done) {
-				// Process any remaining complete events in buffer
-				const parsed = consumeSseEvents(buffer + "\n\n");
-				for (const data of parsed.events) {
-					if (data === "[DONE]") {
-						break;
+				break;
+			}
+
+			buffer += decoder.decode(value, {
+				stream: true,
+			});
+
+			const events = buffer.split("\n\n");
+			buffer = events.pop() || "";
+
+			for (const event of events) {
+				const lines = event.split("\n");
+
+				for (const line of lines) {
+					if (!line.startsWith("data:")) {
+						continue;
 					}
+
+					const rawData = line.slice(5).trim();
+
+					if (!rawData || rawData === "[DONE]") {
+						continue;
+					}
+
 					try {
-						const jsonData = JSON.parse(data);
-						// Handle both Workers AI format (response) and OpenAI format (choices[0].delta.content)
-						let content = "";
+						const parsed = JSON.parse(rawData);
+
+						/*
+						 * Ignore AI Search source-chunk metadata events.
+						 * Only append generated response text.
+						 */
 						if (
-							typeof jsonData.response === "string" &&
-							jsonData.response.length > 0
+							parsed.type === "chunks" ||
+							parsed.chunks
 						) {
-							content = jsonData.response;
-						} else if (jsonData.choices?.[0]?.delta?.content) {
-							content = jsonData.choices[0].delta.content;
+							continue;
 						}
-						if (content) {
-							responseText += content;
-							flushAssistantText();
-						}
-					} catch (e) {
-						console.error("Error parsing SSE data as JSON:", e, data);
-					}
-				}
-				break;
-			}
 
-			// Decode chunk
-			buffer += decoder.decode(value, { stream: true });
-			const parsed = consumeSseEvents(buffer);
-			buffer = parsed.buffer;
-			for (const data of parsed.events) {
-				if (data === "[DONE]") {
-					sawDone = true;
-					buffer = "";
-					break;
-				}
-				try {
-					const jsonData = JSON.parse(data);
-					// Handle both Workers AI format (response) and OpenAI format (choices[0].delta.content)
-					let content = "";
-					if (
-						typeof jsonData.response === "string" &&
-						jsonData.response.length > 0
-					) {
-						content = jsonData.response;
-					} else if (jsonData.choices?.[0]?.delta?.content) {
-						content = jsonData.choices[0].delta.content;
+						const token =
+							parsed.response ||
+							parsed.token ||
+							parsed.delta ||
+							parsed.choices?.[0]?.delta
+								?.content ||
+							parsed.choices?.[0]?.message
+								?.content ||
+							"";
+
+						if (typeof token === "string") {
+							answer += token;
+							typingMessage.bubble.innerHTML =
+								formatMessage(answer);
+							scrollToBottom();
+						}
+					} catch {
+						/*
+						 * Some Workers AI streams provide plain text
+						 * after "data:". Append it safely.
+						 */
+						answer += rawData;
+						typingMessage.bubble.innerHTML =
+							formatMessage(answer);
+						scrollToBottom();
 					}
-					if (content) {
-						responseText += content;
-						flushAssistantText();
-					}
-				} catch (e) {
-					console.error("Error parsing SSE data as JSON:", e, data);
 				}
-			}
-			if (sawDone) {
-				break;
 			}
 		}
 
-		// Add completed response to chat history
-		if (responseText.length > 0) {
-			chatHistory.push({ role: "assistant", content: responseText });
+		if (!answer.trim()) {
+			throw new Error(
+				"No se recibió una respuesta del asistente.",
+			);
 		}
+
+		conversation.push({
+			role: "assistant",
+			content: answer,
+		});
 	} catch (error) {
-		console.error("Error:", error);
-		addMessageToChat(
-			"assistant",
-			"Sorry, there was an error processing your request.",
-		);
+		console.error("Chat error:", error);
+
+		typingMessage.bubble.classList.add("error-message");
+		typingMessage.bubble.textContent =
+			"Lo sentimos, el asesor no está disponible en este momento. Puede escribirnos a paraisodeloros@gmail.com.";
 	} finally {
-		// Hide typing indicator
-		typingIndicator.classList.remove("visible");
-
-		// Re-enable input
-		isProcessing = false;
-		userInput.disabled = false;
-		sendButton.disabled = false;
-		userInput.focus();
+		setLoading(false);
+		input.focus();
+		scrollToBottom();
 	}
 }
 
-/**
- * Helper function to add message to chat
- */
-function addMessageToChat(role, content) {
-	const messageEl = document.createElement("div");
-	messageEl.className = `message ${role}-message`;
-	messageEl.innerHTML = `<p>${content}</p>`;
-	chatMessages.appendChild(messageEl);
+form.addEventListener("submit", (event) => {
+	event.preventDefault();
+	submitMessage(input.value);
+});
 
-	// Scroll to bottom
-	chatMessages.scrollTop = chatMessages.scrollHeight;
-}
+input.addEventListener("keydown", (event) => {
+	if (
+		event.key === "Enter" &&
+		!event.shiftKey &&
+		!event.isComposing
+	) {
+		event.preventDefault();
+		form.requestSubmit();
+	}
+});
 
-function consumeSseEvents(buffer) {
-	let normalized = buffer.replace(/\r/g, "");
-	const events = [];
-	let eventEndIndex;
-	while ((eventEndIndex = normalized.indexOf("\n\n")) !== -1) {
-		const rawEvent = normalized.slice(0, eventEndIndex);
-		normalized = normalized.slice(eventEndIndex + 2);
+document.querySelectorAll(".quick-action").forEach((button) => {
+	button.addEventListener("click", () => {
+		const message = button.dataset.message;
 
-		const lines = rawEvent.split("\n");
-		const dataLines = [];
-		for (const line of lines) {
-			if (line.startsWith("data:")) {
-				dataLines.push(line.slice("data:".length).trimStart());
-			}
+		if (message) {
+			submitMessage(message);
 		}
-		if (dataLines.length === 0) continue;
-		events.push(dataLines.join("\n"));
-	}
-	return { events, buffer: normalized };
-}
+	});
+});
+
+input.focus();
+scrollToBottom();
