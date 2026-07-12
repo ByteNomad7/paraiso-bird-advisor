@@ -6,17 +6,33 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "paraiso-bird-advisor",
 	"main": "src/index.ts",
-	"compatibility_date": "2025-10-08",
-	"compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+	"compatibility_date": "2026-07-12",
+	"compatibility_flags": [
+		"nodejs_compat",
+		"global_fetch_strictly_public"
+	],
+
 	"assets": {
 		"binding": "ASSETS",
 		"directory": "./public"
 	},
+
 	"observability": {
 		"enabled": true
 	},
+
 	"ai": {
-		"binding": "AI"
+		"binding": "AI",
+		"remote": true
 	},
+
+	"ai_search": [
+		{
+			"binding": "PARAISO_SEARCH",
+			"instance_name": "paraiso-knowledge",
+			"remote": true
+		}
+	],
+
 	"upload_source_maps": true
 }
