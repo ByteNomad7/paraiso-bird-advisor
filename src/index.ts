@@ -1,5 +1,5 @@
 /**
- * LLM Chat Application for Paraíso de Aves
+ * Paraíso de Aves AI Bird Adviser
  *
  * Uses Cloudflare AI Search to retrieve information from
  * paraisodeaves.com before generating a response.
@@ -8,9 +8,6 @@
  */
 
 import { Env, ChatMessage } from "./types";
-
-// Workers AI model used to generate responses.
-const MODEL_ID = "@cf/meta/llama-3.1-8b-instruct-fp8";
 
 const SYSTEM_PROMPT = `
 You are the official AI Bird Adviser for Paraíso de Aves.
@@ -66,14 +63,14 @@ Help visitors understand:
 WEBSITE KNOWLEDGE
 
 - Treat retrieved content from paraisodeaves.com as the primary source of truth.
-- Answer factual questions using the retrieved website content.
+- Answer factual questions using retrieved website content.
 - Never contradict retrieved website content.
-- If the retrieved content does not contain enough information, clearly say that the answer could not be verified from the Paraíso de Aves website.
+- If retrieved content does not provide enough information, clearly say that the answer could not be verified from the Paraíso de Aves website.
 - Do not fill missing business information using assumptions or general model knowledge.
 - Never invent availability, prices, ages, sex, health status, delivery dates or legal permissions.
-- Do not claim to have checked live inventory unless verified inventory data has been supplied.
-- When useful, mention the relevant Paraíso de Aves page used for the answer.
-- Never invent website page URLs.
+- Do not claim to have checked live inventory unless verified inventory information has been retrieved.
+- When useful, mention the relevant Paraíso de Aves page.
+- Never invent website URLs.
 
 STRICT BUSINESS RULES
 
@@ -83,7 +80,7 @@ STRICT BUSINESS RULES
 - Never invent sex.
 - Never invent health information.
 - Never invent delivery dates.
-- Never claim that a bird is available, reserved or sold unless verified data has been provided.
+- Never claim that a bird is available, reserved or sold unless verified information has been provided.
 - Never guarantee that a bird will talk.
 - Never guarantee that a bird will tolerate children.
 - Never guarantee that two birds will bond or live together successfully.
@@ -118,9 +115,6 @@ End purchase-related responses with a clear next step, such as viewing available
 `;
 
 export default {
-	/**
-	 * Main request handler.
-	 */
 	async fetch(
 		request: Request,
 		env: Env,
@@ -128,12 +122,12 @@ export default {
 	): Promise<Response> {
 		const url = new URL(request.url);
 
-		// Serve the frontend and other static assets.
+		// Serve frontend and static files.
 		if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
 			return env.ASSETS.fetch(request);
 		}
 
-		// Chat API endpoint.
+		// Chat API.
 		if (url.pathname === "/api/chat") {
 			if (request.method !== "POST") {
 				return new Response("Method not allowed", {
@@ -147,13 +141,12 @@ export default {
 			return handleChatRequest(request, env);
 		}
 
-		return new Response("Not found", { status: 404 });
+		return new Response("Not found", {
+			status: 404,
+		});
 	},
 } satisfies ExportedHandler<Env>;
 
-/**
- * Processes a chat request using Cloudflare AI Search.
- */
 async function handleChatRequest(
 	request: Request,
 	env: Env,
@@ -167,12 +160,7 @@ async function handleChatRequest(
 			? body.messages
 			: [];
 
-		/*
-		 * Remove client-supplied system prompts so visitors cannot override
-		 * the official Paraíso de Aves instructions.
-		 *
-		 * Keep only the last 10 user/assistant messages.
-		 */
+		// Ignore client-supplied system prompts and keep the last 10 messages.
 		const cleanMessages: ChatMessage[] = incomingMessages
 			.filter(
 				(message): message is ChatMessage =>
@@ -210,42 +198,40 @@ async function handleChatRequest(
 		];
 
 		/*
-		 * AI Search retrieves relevant content from paraisodeaves.com
-		 * and then generates a grounded answer.
+		 * Important:
+		 * Do not force retrieval_type: "hybrid".
+		 * Your current AI Search index has keyword indexing disabled.
+		 * Cloudflare will use the retrieval configuration of the instance.
 		 */
-	const stream = await env.PARAISO_SEARCH.chatCompletions({
-	messages,
-	stream: true,
-});
+		const stream = await env.PARAISO_SEARCH.chatCompletions({
+			messages,
+			stream: true,
+		});
 
 		return new Response(stream, {
 			headers: {
-				"content-type":
-					"text/event-stream; charset=utf-8",
-				"cache-control":
-					"no-cache, no-transform",
+				"content-type": "text/event-stream; charset=utf-8",
+				"cache-control": "no-cache, no-transform",
 				connection: "keep-alive",
 				"x-content-type-options": "nosniff",
 			},
 		});
 	} catch (error) {
-		console.error(
-			"Error processing chat request:",
-			error,
-		);
+		console.error("Error processing chat request:", error);
+
+		const message =
+			error instanceof Error ? error.message : "Unknown error";
 
 		return jsonResponse(
 			{
 				error: "Failed to process request.",
+				details: message,
 			},
 			500,
 		);
 	}
 }
 
-/**
- * Creates a JSON response.
- */
 function jsonResponse(
 	data: Record<string, unknown>,
 	status = 200,
@@ -253,8 +239,7 @@ function jsonResponse(
 	return new Response(JSON.stringify(data), {
 		status,
 		headers: {
-			"content-type":
-				"application/json; charset=utf-8",
+			"content-type": "application/json; charset=utf-8",
 			"cache-control": "no-store",
 		},
 	});
