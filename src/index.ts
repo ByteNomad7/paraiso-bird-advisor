@@ -72,6 +72,24 @@ WEBSITE KNOWLEDGE
 - When useful, mention the relevant Paraíso de Aves page.
 - Never invent website URLs.
 
+SOURCE ACCURACY
+
+- Mention only pages, article titles, prices, availability details or policies that are explicitly present in the retrieved content.
+- Do not invent article names, page titles, sections or URLs.
+- Do not say that current availability or prices are listed unless the retrieved content clearly confirms this.
+- If retrieved content is broad or incomplete, summarise only what is clearly supported.
+- Prefer phrases such as "La web explica..." or "Según el contenido recuperado..." when replying in Spanish.
+- Use equivalent natural wording in the visitor's language.
+- When exact source pages are unavailable, do not fabricate examples.
+- Never present general model knowledge as information published by Paraíso de Aves.
+
+LINKING
+
+- Include a Paraíso de Aves page URL only when that exact URL is present in the retrieved information.
+- Never create or guess URLs.
+- If a relevant page cannot be identified, direct the visitor to https://www.paraisodeaves.com.
+- For purchase-related enquiries, recommend viewing the Available Birds section or contacting the team through the website.
+
 STRICT BUSINESS RULES
 
 - Never invent current bird availability.
@@ -102,6 +120,7 @@ RESPONSE BEHAVIOUR
 - When unsure, clearly state that the information must be confirmed by the Paraíso de Aves team.
 - When discussing prices, availability, delivery or documentation, recommend submitting an enquiry through the website.
 - When appropriate, direct visitors to the Available Birds, Delivery, CITES or Contact sections.
+- Do not claim that information is current unless the retrieved content clearly confirms that it is current.
 
 CONTACT
 
@@ -122,12 +141,12 @@ export default {
 	): Promise<Response> {
 		const url = new URL(request.url);
 
-		// Serve frontend and static files.
+		// Serve the frontend and static files.
 		if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
 			return env.ASSETS.fetch(request);
 		}
 
-		// Chat API.
+		// Chat API endpoint.
 		if (url.pathname === "/api/chat") {
 			if (request.method !== "POST") {
 				return new Response("Method not allowed", {
@@ -160,7 +179,10 @@ async function handleChatRequest(
 			? body.messages
 			: [];
 
-		// Ignore client-supplied system prompts and keep the last 10 messages.
+		/*
+		 * Ignore any system prompts submitted by visitors.
+		 * Keep only the latest user and assistant messages.
+		 */
 		const cleanMessages: ChatMessage[] = incomingMessages
 			.filter(
 				(message): message is ChatMessage =>
@@ -198,10 +220,8 @@ async function handleChatRequest(
 		];
 
 		/*
-		 * Important:
-		 * Do not force retrieval_type: "hybrid".
-		 * Your current AI Search index has keyword indexing disabled.
-		 * Cloudflare will use the retrieval configuration of the instance.
+		 * Do not force hybrid retrieval.
+		 * The current AI Search index uses its configured vector retrieval.
 		 */
 		const stream = await env.PARAISO_SEARCH.chatCompletions({
 			messages,
@@ -219,13 +239,13 @@ async function handleChatRequest(
 	} catch (error) {
 		console.error("Error processing chat request:", error);
 
-		const message =
+		const details =
 			error instanceof Error ? error.message : "Unknown error";
 
 		return jsonResponse(
 			{
 				error: "Failed to process request.",
-				details: message,
+				details,
 			},
 			500,
 		);
