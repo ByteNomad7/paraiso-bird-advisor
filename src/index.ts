@@ -213,23 +213,10 @@ async function handleChatRequest(
 		 * AI Search retrieves relevant content from paraisodeaves.com
 		 * and then generates a grounded answer.
 		 */
-		const stream =
-			await env.PARAISO_SEARCH.chatCompletions({
-				messages,
-				model: MODEL_ID,
-				stream: true,
-				ai_search_options: {
-					retrieval: {
-						retrieval_type: "hybrid",
-						max_num_results: 6,
-						match_threshold: 0.4,
-						context_expansion: 1,
-					},
-					query_rewrite: {
-						enabled: true,
-					},
-				},
-			});
+	const stream = await env.PARAISO_SEARCH.chatCompletions({
+	messages,
+	stream: true,
+});
 
 		return new Response(stream, {
 			headers: {
